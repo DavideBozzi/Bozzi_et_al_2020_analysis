@@ -1,0 +1,139 @@
+##########################################################################################
+#                      Metabarcoding data pre-processing pipeline                        #
+##########################################################################################
+
+### Create an object containing the path to the directory were you want to store your fastq files: (0-data) ###
+FASTQ_DIR='insert the path to your fastq files directory'
+
+### Create an object containing the path to the working directory ###
+WORK_DIR='insert the path to your working directory'
+
+##########################################################################################
+#                                         Initial QC                                     #
+##########################################################################################
+
+module load java fastqc/v0.11.8a
+fastqc -o $WORK_DIR/ $FASTQ_DIR/*.fastq.gz
+
+cd $WORK_DIR/
+find *_fastqc.zip > temp
+sed 's/_fastqc.zip//g' temp > temp2
+uniq temp2 > sample_list.txt
+rm -f temp*
+sample_list=$(cat sample_list.txt)
+
+cd $WORK_DIR
+for a in $sample_list
+  do
+  unzip "$a"_fastqc.zip
+  cd "$a"_fastqc
+    total_seqs=`cat fastqc_data.txt | grep 'Total Sequences' | cut -f 2`
+    gc_percent=`cat fastqc_data.txt | grep '%GC' | cut -f 2`
+    seq_length=`cat fastqc_data.txt | grep 'Sequence length' | cut -f 2`
+    seq_qual=`cat fastqc_data.txt | awk '/>>Per base sequence quality/,/>>END_MODULE/' | tail -n +3 | head -n -1 | awk '{total+=$2} END {print total/NR}'`
+    n_count=`cat fastqc_data.txt | awk '/>>Per base N content/,/>>END_MODULE/' | tail -n +3 | head -n -1 | awk '{total+=$2} END {print total/NR}'`
+		Dedub_level=`cat fastqc_data.txt | grep '#Total Deduplicated Percentage' | cut -f 2`
+		echo -e "File Name:\t"$a"\nNumber of Sequences:\t${total_seqs}\nGC%:\t${gc_percent}\nSequence Length:\t${seq_length}\nAverage per base sequence quality:\t${seq_qual}\nRemaining data (%) after deduplication:\t${Dedub_level}\nN%\t${n_count}" > ../"$a"_short.txt
+    cd ..
+    rm -r "$a"_fastqc
+done
+
+rm sample_list.txt
+cat *.txt > FastQC_PostTrim_report.txt
+rm *_short.txt
+
+##########################################################################################
+#                           Trimming with AdapterRemoval                                 #
+##########################################################################################
+# N.B. CHANGE THE SEQUENCING CODE IN THE FOLLOWING SCRIPT BEFORE PROCEEDING
+# CHANGE XXXXX WITH YOUR FIVE LETTER CODE (IN THREE POSITIONS INDICATED BY COMMENTS)
+
+#update (if necessary) the following object:
+WORK_DIR='insert the path to your working directory'
+
+module load AdapterRemoval
+
+cd $FASTQ_DIR/
+find *fastq.gz > temp
+sed 's/_L001_R[1-2]_001.fastq.gz//g' temp > temp2
+sed 's/TOG-XXXXX-//g' temp2 > temp3 # insert your five letter sequencing code in XXXXX position
+uniq temp3 > sample_list.txt
+rm -f temp*
+sample_list=$(cat sample_list.txt)
+cd $WORK_DIR
+
+# N.B. insert your five letter sequencing code in XXXXX positions
+# select the desired minimum quality and other parameters
+for a in $sample_list
+  do
+    AdapterRemoval --file1 $FASTQ_DIR/TOG-XXXXX-"$a"_L001_R1_001.fastq.gz  --file2 $FASTQ_DIR/TOG-XXXXX-"$a"_L001_R2_001.fastq.gz --threads 20 --mm 0.05 --minlength 100 --shift 5 --trimns --trimqualities --qualitybase 33 --minquality 28 --basename $WORK_DIR/"$a" --collapse
+done
+
+##########################################################################################
+#                                   Sort files with Begum                                #
+##########################################################################################
+# you will need 4 files (primer file, tag file, sample information file, pool information file):
+# 16S_primers.txt (File with forward and reverse primer sequence)
+# pool_16S.txt (File with pool information)
+# PSinfo_16S.txt (File with tag combo and pool for each sample)
+# tags_16S.txt (File with tag name and sequence)
+
+# create an object with the path to the directory containing the begum files
+BEGUM_DIR='insert the path to your begum files directory'
+# create an object with the path to the directory which will contain the begum output
+OUTPUT_DIR='insert the path to your output directory'
+#update (if necessary) the following object:
+WORK_DIR='insert the path to your working directory'
+
+cd $WORK_DIR/
+module load python/v2.7.12 Begum/v1.0
+
+for i in '16S'
+  do
+  Begum sort -l $BEGUM_DIR/pool_${i}.txt -p  $BEGUM_DIR/${i}_primers.txt -t  $BEGUM_DIR/tags_${i}.txt -s  $BEGUM_DIR/PSinfo_${i}.txt -d $OUTPUT_DIR/ -o sorted_${i}
+done
+
+##########################################################################################
+#                                    Filter with Begum                                   #
+##########################################################################################
+
+#update (if necessary) the following objects:
+WORK_DIR='insert the path to your working directory'
+OUTPUT_DIR='insert the path to your output directory'
+
+cd $WORK_DIR/
+for i in '16S'
+  do
+  Begum filter -i $WORK_DIR/sorted_${i} -s  $BEGUM_DIR/PSinfo_${i}.txt -p 0.66 -l 380 -m 2 -d $OUTPUT_DIR/ -o filtered_${i}
+done
+
+##########################################################################################
+#                                    Cluster with SumaClust                              #
+##########################################################################################
+# create an object with the path to the directory containing the DAMe scripts
+DAMe_SCRIPT_DIR='insert the path to the directory with "convertToUSearch.py" and "tabulateSumaclust.py"'
+#update (if necessary) the following objects:
+WORK_DIR='insert the path to your working directory'
+
+module load sumaclust/v1.0.20
+
+for i in '16S'
+  do
+    cd $WORK_DIR/
+    python $DAMe_SCRIPT_DIR/convertToUSearch.py -i filtered_${i}.fna -lmin 380 -lmax 480
+    sumaclust -e FilteredReads.forsumaclust.fna -F OTUs_${i}.fna -t 0.97
+    python $DAMe_SCRIPT_DIR/tabulateSumaclust.py -i OTUs_${i}.fna -o table_${i}.txt -blast
+    cd /../
+done
+
+##########################################################################################
+#                                    BLAST with blatsn                                   #
+##########################################################################################
+#update (if necessary) the following objects:
+WORK_DIR='insert the path to your working directory'
+OUTPUT_DIR='insert the path to your output directory'
+
+module load vsearch/v2.1.2  python/v2.7.12  cutadapt/v1.11   usearch/v9.0.2132  fastx-toolkit/v0.0.13  seqtk/v1.2 blast/v2.2.26 qiime/vMod
+
+cd WORK_DIR/
+assign_taxonomy.py -i table_${i}.txt.blast.txt -m blast -o $OUTPUT_DIR/
